@@ -1,11 +1,18 @@
 #include <SPI.h>
 #include <Arduino.h>
+#include <Preferences.h>
 
 #include <Adafruit_GFX.h>
 #include <Max72xxPanel.h>
 #include "ButtonGrid.h"
 
 #define MAX_COMMAND_LENGTH 200
+
+enum mode {
+    MODE_NORMAL,
+    MODE_TESTING,
+    MODE_BRIGHTNESS
+};
 
 int pinCS = D9; // Attach CS to this pin, DIN to MOSI and CLK to SCK (cf http://arduino.cc/en/Reference/SPI )
 
@@ -16,6 +23,16 @@ unsigned char buttonStates[8];
 
 String inputString = "";         // a String to hold incoming data
 bool stringComplete = false;  // whether the string is complete
+
+int pressesRemaining[8][8];
+const int TEST_PRESS_COUNT = 2; // Default number of presses for each button in testing mode
+
+mode currentMode = MODE_NORMAL;
+Preferences preferences;
+
+int brightness = 1; // Default brightness
+
+void ButtonCallback(int x, int y, bool state);
 
 void bootUpLights()
 {
@@ -29,7 +46,11 @@ void bootUpLights()
         delay(50);
     }
     
-    delay(200);
+    long endTime = millis() + 200;
+    while(millis() < endTime)
+    {
+        buttonGrid.Update();
+    }
 
     for(int i = 0; i < 8; i++)
     {
@@ -70,6 +91,160 @@ void SetCol(int x, unsigned char state)
     matrix.write();
 }
 
+void BrightnessModeButtonCallback(int x, int y, bool state)
+{
+    if(state)
+    {
+        if(y == 6)
+        {
+            brightness = (8 + x);
+            Serial.print("/grid/brightness ");
+            Serial.println(brightness); 
+            matrix.setIntensity(brightness);            
+        }
+        else if(y == 7)
+        {
+            brightness = x;
+            Serial.print("/grid/brightness ");
+            Serial.println(brightness); 
+            matrix.setIntensity(brightness);
+        }
+        else if(x == 0 && y == 0)
+        {
+            preferences.putInt("brightness", brightness);
+            preferences.end();
+
+            matrix.fillScreen(HIGH);
+            matrix.write();
+            delay(200);
+
+            matrix.fillScreen(LOW);
+            matrix.write();        
+            
+            currentMode = MODE_NORMAL;
+            buttonGrid.RegisterButtonCallback(ButtonCallback);
+        }
+    }
+}
+
+void TestingModeButtonCallback(int x, int y, bool state)
+{
+    if(state)
+    {
+        pressesRemaining[x][y]--;
+        if(pressesRemaining[x][y] < 0)
+        {
+            pressesRemaining[x][y] = 0;
+        }
+
+        Serial.print("/test/key ");
+        Serial.print(x);
+        Serial.print(" ");
+        Serial.print(y);
+        Serial.print(" ");
+        Serial.println(pressesRemaining[x][y]);
+    }
+    else
+    {
+        bool allZero = true;
+        for(int i = 0; i < 8; i++)
+        {
+            for(int j = 0; j < 8; j++)
+            {
+                if(pressesRemaining[i][j] != 0)
+                {
+                    allZero = false;
+                    break;
+                }
+            }
+        }
+
+        if(allZero)
+        {
+            Serial.println("/test/complete");
+
+            matrix.fillScreen(HIGH);
+            matrix.write();
+            delay(200);
+
+            matrix.fillScreen(LOW);
+            matrix.write();        
+            
+            currentMode = MODE_NORMAL;
+            buttonGrid.RegisterButtonCallback(ButtonCallback);
+        }        
+    }
+}
+
+
+void TestingModeUpdateLeds()
+{
+    for(int y = 0; y < 8; y++)
+    {
+        for(int x = 0; x < 8; x++)
+        {
+            if(pressesRemaining[x][y] >= TEST_PRESS_COUNT)
+            {
+                matrix.drawPixel(x, y, HIGH);
+            }
+            else if(pressesRemaining[x][y] == 0)
+            {
+                matrix.drawPixel(x, y, LOW);
+            }
+            else 
+            {
+                uint16_t color = (millis() / 100) % (1 + pressesRemaining[x][y]) == 0 ? HIGH : LOW;
+                matrix.drawPixel(x, y, color);
+            }
+        }
+    }
+    matrix.write();
+}
+
+void BrightnessModeUpdateLeds()
+{
+    matrix.drawLine(0, 6, 7, 6, HIGH); // Brightness row
+    matrix.drawLine(0, 7, 7, 7, HIGH); // Brightness row
+
+    int x = (brightness) % 8;
+    int y = 7 - (brightness / 8);
+    matrix.drawPixel(x, y, millis() / 200 % 2 == 0 ? HIGH : LOW); // Brightness mode indicator    
+
+    matrix.drawPixel(0, 0, millis() / 400 % 2 == 0 ? HIGH : LOW); // Brightness mode indicator
+
+    matrix.write();
+}
+void ButtonModeCallback(int x, int y, bool state)
+{
+    if(state)
+    {
+
+        if(x == 0 && y == 0)
+        {
+            // Toggle mode
+            currentMode = MODE_BRIGHTNESS;
+        }
+        else if(x == 1 && y == 0)
+        {
+            currentMode = MODE_TESTING;
+        }
+    }
+    else
+    {
+        if(x == 0 && y == 0)
+        {
+            // Toggle mode
+            currentMode = MODE_NORMAL;
+        }
+        else if(x == 1 && y == 0)
+        {
+            currentMode = MODE_NORMAL;
+        }        
+    }
+
+
+}
+
 void ButtonCallback(int x, int y, bool state)
 {
     bitWrite(buttonStates[y], x, (int)state);
@@ -81,6 +256,7 @@ void ButtonCallback(int x, int y, bool state)
     Serial.print(" ");
     Serial.println(state);
 }
+
 
 void ProcessSerial()
 {
@@ -199,15 +375,30 @@ void UpdateSerial()
 void setup() 
 {
     Serial.begin(115200);
-    delay(1000); // Allow time for serial monitor to connect
 
-    matrix.setIntensity(15); // Set brightness between 0 and 15
+    // get the brightness from 
+    preferences.begin("buttonGrid", false); // namespace, read-only flag
+    brightness = preferences.getInt("brightness", brightness); // key, default value
+
+    matrix.setIntensity(brightness); // Set brightness between 0 and 15
     matrix.setRotation(1);
+    
+    #ifdef FLIP_LED
+    matrix.setFlip(true, false);
+    #endif
+    
     matrix.fillScreen(LOW);
     matrix.write();
-
+    
     buttonGrid.Setup();
-    buttonGrid.RegisterButtonCallback(ButtonCallback);
+    
+    currentMode = MODE_NORMAL;
+    buttonGrid.RegisterButtonCallback(ButtonModeCallback);
+    
+    bootUpLights();
+
+    Serial.print("/grid/brightness ");
+    Serial.println(brightness);
     
     for(int i = 0; i < 8; i++)
     {
@@ -217,10 +408,45 @@ void setup()
     // reserve bytes for the inputString:
     inputString.reserve(MAX_COMMAND_LENGTH);  
     
-    //bootUpLights();
+    if(currentMode == MODE_TESTING)
+    {
+        Serial.println("/grid/mode testing");
+        for(int x = 0; x < 8; x++)
+        {
+            for(int y = 0; y < 8; y++)
+            {
+                pressesRemaining[x][y] = TEST_PRESS_COUNT;
+            }
+        }
+
+        buttonGrid.RegisterButtonCallback(TestingModeButtonCallback);
+
+    }
+    else if(currentMode == MODE_BRIGHTNESS)
+    {
+        Serial.println("/grid/mode brightness");
+        buttonGrid.RegisterButtonCallback(BrightnessModeButtonCallback);
+    }
+    else
+    {
+        buttonGrid.RegisterButtonCallback(ButtonCallback);
+    }
 }
 
 void loop() 
 {
-    buttonGrid.Update();    
+    buttonGrid.Update();
+
+    if(currentMode == MODE_TESTING)
+    {
+        TestingModeUpdateLeds();
+    }
+    else if(currentMode == MODE_BRIGHTNESS)
+    {
+        BrightnessModeUpdateLeds();
+    }
+    else
+    {
+        UpdateSerial();
+    }
 }

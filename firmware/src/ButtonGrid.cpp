@@ -23,7 +23,20 @@ void ButtonGrid::Setup()
 
     digitalWrite(_sipoClearPin, HIGH);
     digitalWrite(_sipoClockPin, LOW);    
-    digitalWrite(_sipoDataPin, LOW);    
+    digitalWrite(_sipoDataPin, LOW);  
+    
+    // Reset all button states
+    for(int x = 0; x < GRID_WIDTH; x++)
+    {
+        for(int y = 0; y < GRID_HEIGHT; y++)
+        {
+            _buttons[x][y].state = false;
+            _buttons[x][y].debounceComplete = false;
+            _buttons[x][y].pressTime = 0;
+        }
+    }
+
+    ResetOffset();
 }
 
 void ButtonGrid::Update()
@@ -35,15 +48,18 @@ void ButtonGrid::UpdateButtonStates()
 {
     for(int x = 0; x < 8; x++)
     {     
+        
         unsigned char newButtonStates = ReadByte();
-
+        
         for(int y = 0; y < 8; y++)
         {
-            UpdateButtonState(x, (7-y), !(newButtonStates & (1 << y)));
+            UpdateButtonState(x, (7-y), (newButtonStates >> y & 1) == LOW );
         }
-       
+        
+        
         IncrementOffset();   
     }
+
 }
 
 unsigned char ButtonGrid::ReadByte()
@@ -67,7 +83,7 @@ unsigned char ButtonGrid::ReadByte()
         digitalWrite(_pisoClockPin, HIGH); //send a clock leading edge so to load the next bit
         delayMicroseconds(DELAY_MICROSECONDS);
     } 
-
+    
     return data;
 }
 
@@ -140,7 +156,7 @@ void ButtonGrid::UpdateButtonState(int x, int y, bool state)
     else
     {
         if(_buttons[x][y].state == true && _buttons[x][y].debounceComplete == false && millis() - _buttons[x][y].pressTime > DEBOUNCE_TIME)
-        {
+        {         
             if(_buttonStateCallback != NULL)
             {
                 _buttonStateCallback(x,y,true);
